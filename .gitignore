@@ -1,0 +1,10 @@
+# Credenciales y secretos: NUNCA deben subirse al repositorio
+.env
+credentials.json
+token.json
+
+# Dependencias (se reinstalan con npm install, no hace falta versionarlas)
+node_modules/
+
+# Logs
+*.log
