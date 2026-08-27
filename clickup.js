@@ -42,7 +42,13 @@ async function getPendingTasks() {
 
     const data = await res.json();
     for (const task of data.tasks || []) {
-      results.push({ id: task.id, name: task.name, listKey: key, listLabel: list.label });
+      results.push({
+        id: task.id,
+        name: task.name,
+        listKey: key,
+        listLabel: list.label,
+        dueDate: task.due_date ? Number(task.due_date) : null,
+      });
     }
   }
 
@@ -95,12 +101,18 @@ function parseAddCommand(rawText) {
   return { listKey: 'general', text: rawText.trim() };
 }
 
-async function addTask(listKey, text) {
+async function addTask(listKey, text, dueDateMs) {
   const list = LISTS[listKey];
+  const body = { name: text };
+  if (dueDateMs) {
+    body.due_date = dueDateMs;
+    body.due_date_time = true;
+  }
+
   const res = await fetch(`${CLICKUP_API}/list/${list.id}/task`, {
     method: 'POST',
     headers: headers(),
-    body: JSON.stringify({ name: text }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {

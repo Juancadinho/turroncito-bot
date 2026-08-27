@@ -1,6 +1,7 @@
 const OpenAI = require('openai');
 const { getTodayEvents } = require('./calendar');
 const { getPendingTasks, addTask, completeTask, editTask, deleteTask } = require('./clickup');
+const { formatNowForPrompt, dateStringToEpochMs, epochMsToDateLabel } = require('./dateUtils');
 
 const MODEL = 'openai/gpt-oss-20b';
 const TIMEZONE = 'America/Santiago';
@@ -10,14 +11,22 @@ const client = new OpenAI({
   baseURL: 'https://api.groq.com/openai/v1',
 });
 
-const SYSTEM_INSTRUCTION = `Eres "Turrón", el asistente personal de Juanca en Telegram. Le hablas de forma
+function buildSystemInstruction() {
+  return `Eres "Turrón", el asistente personal de Juanca en Telegram. Le hablas de forma
 natural, breve y directa, cercana y con calidez, como un amigo por chat (no como un documento formal). Juanca es estudiante
 vespertino de último año de Ingeniería Civil Informática, trabaja en Uber y hace fletes/reemplazos de
 recepcionista, juega fútbol dos veces por semana y tenis una vez, y entrena push/pull/legs + cardio.
 
+Hoy es ${formatNowForPrompt(TIMEZONE)} (hora de Chile). Usa esta fecha como referencia para calcular cualquier
+fecha relativa que Juanca mencione ("mañana", "el viernes", "en tres días", etc.).
+
 Tienes acceso a herramientas para consultar su Google Calendar y sus tareas de ClickUp (organizadas en listas:
 General, Universidad, Trabajo, Deporte y Gym). Puedes consultar el calendario, ver tareas pendientes, agregar
-tareas nuevas, editarlas y eliminarlas, de forma directa, sin pedir permiso para consultar o agregar.
+tareas nuevas (con o sin fecha de vencimiento), editarlas y eliminarlas, de forma directa, sin pedir permiso para
+consultar o agregar — "agregar_tarea" nunca necesita confirmación previa, tenga fecha o no.
+
+Cuando uses "listar_tareas_pendientes", cada tarea puede traer "fecha_vencimiento". Compárala con la fecha de hoy
+de arriba y avísale a Juanca si alguna tarea vence hoy, vence pronto (los próximos días) o ya está vencida.
 
 REGLA IMPORTANTE: antes de llamar a "completar_tarea", "editar_tarea" o "eliminar_tarea", SIEMPRE debes primero
 responder con un mensaje de texto normal (sin llamar ninguna función todavía) diciendo exactamente qué tarea vas
@@ -40,6 +49,7 @@ de viñeta. Si en algún borrador interno se te ocurre poner **algo así**, corr
 sin los asteriscos: algo así. En su lugar, para dar énfasis o separar ítems usa emojis al inicio de cada línea o
 dato importante (📅 🕒 ✅ 📌 💼 🏃) y saltos de línea simples, de forma que se vea ordenado y visual sin depender
 de ningún símbolo de formato markdown (nada de *, **, #, - ni _ como marcadores de estilo).`;
+}
 
 const tools = [
   {
@@ -55,8 +65,8 @@ const tools = [
     function: {
       name: 'listar_tareas_pendientes',
       description:
-        'Devuelve las tareas pendientes (no completadas) de ClickUp, con su id, nombre y en qué lista está ' +
-        '(General, Universidad, Trabajo, Deporte y Gym).',
+        'Devuelve las tareas pendientes (no completadas) de ClickUp, con su id, nombre, en qué lista está ' +
+        '(General, Universidad, Trabajo, Deporte y Gym) y su fecha de vencimiento si tiene una asignada.',
       parameters: { type: 'object', properties: {}, required: [] },
     },
   },
@@ -73,6 +83,15 @@ const tools = [
             type: 'string',
             enum: ['general', 'uni', 'trabajo', 'deporte'],
             description: 'En qué lista crearla. Si Juanca no especifica, usa "general".',
+          },
+          fecha: {
+            type: 'string',
+            description:
+              'Fecha de vencimiento, SOLO si Juanca la menciona. Formato "YYYY-MM-DD" o, si menciona hora, ' +
+              '"YYYY-MM-DD HH:mm" (24h). Debes calcularla tú mismo usando la fecha de hoy indicada arriba: ' +
+              'por ejemplo si hoy es 2026-08-27 y dice "mañana", usa "2026-08-28"; si dice "el viernes", usa ' +
+              'la fecha del próximo viernes. Nunca escribas aquí la palabra relativa tal cual ("mañana", ' +
+              '"el viernes"), siempre la fecha ya calculada.',
           },
         },
         required: ['texto', 'lista'],
@@ -192,10 +211,16 @@ async function callTool(name, args) {
     }
     case 'listar_tareas_pendientes': {
       const tasks = await getPendingTasks();
-      return tasks.map((t) => ({ id: t.id, nombre: t.name, lista: t.listLabel }));
+      return tasks.map((t) => ({
+        id: t.id,
+        nombre: t.name,
+        lista: t.listLabel,
+        fecha_vencimiento: t.dueDate ? epochMsToDateLabel(t.dueDate, TIMEZONE) : null,
+      }));
     }
     case 'agregar_tarea': {
-      const listLabel = await addTask(args.lista || 'general', args.texto);
+      const dueDateMs = args.fecha ? dateStringToEpochMs(args.fecha, TIMEZONE) : undefined;
+      const listLabel = await addTask(args.lista || 'general', args.texto, dueDateMs);
       return { ok: true, lista: listLabel };
     }
     case 'completar_tarea': {
@@ -221,7 +246,7 @@ async function handleMessage(chatId, userText) {
 
   const baseParams = {
     model: MODEL,
-    messages: [{ role: 'system', content: SYSTEM_INSTRUCTION }, ...messages],
+    messages: [{ role: 'system', content: buildSystemInstruction() }, ...messages],
     tools,
   };
 
@@ -250,7 +275,7 @@ async function handleMessage(chatId, userText) {
 
     completion = await createCompletionWithRetry({
       model: MODEL,
-      messages: [{ role: 'system', content: SYSTEM_INSTRUCTION }, ...messages],
+      messages: [{ role: 'system', content: buildSystemInstruction() }, ...messages],
       tools,
     });
     message = completion.choices[0].message;
